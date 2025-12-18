@@ -223,43 +223,32 @@ def create_generation_plan(target_num):
     idx = 0
     
     categories = list(config.SAFETY_CATEGORIES.keys())
-    
-    # Calculate samples per category for balanced distribution
     samples_per_category = target_num // len(categories)
     remainder = target_num % len(categories)
     
-    print(f"\nGeneration plan:")
-    print(f"  Target: {target_num} conversations")
-    print(f"  Categories: {len(categories)}")
-    print(f"  Base samples per category: {samples_per_category}")
+    # 准备加权采样
+    scenario_types = list(config.TARGET_DISTRIBUTION["scenario_distribution"].keys())
+    scenario_weights = list(config.TARGET_DISTRIBUTION["scenario_distribution"].values())
+    
+    severity_levels = list(config.TARGET_DISTRIBUTION["severity_distribution"].keys())
+    severity_weights = list(config.TARGET_DISTRIBUTION["severity_distribution"].values())
     
     for cat_idx, category in enumerate(categories):
-        # Add remainder to first few categories
         num_samples = samples_per_category + (1 if cat_idx < remainder else 0)
         
-        # Distribute samples across scenarios and severities
         for i in range(num_samples):
-            # Cycle through scenarios and severities for variety
-            scenario_types = list(config.SCENARIO_TYPES.keys())
-            severities = list(config.SEVERITY_LEVELS.keys())
+            scenario = random.choices(scenario_types, weights=scenario_weights, k=1)[0]
+            severity = random.choices(severity_levels, weights=severity_weights, k=1)[0]
             
-            scenario = scenario_types[i % len(scenario_types)]
-            severity = severities[i % len(severities)]
-            
-            # Ensure logical consistency
-            # Benign scenarios should have benign severity
             if scenario == "benign":
                 severity = "benign"
-            # Jailbreak attempts are typically high severity
             elif scenario == "jailbreak_attempt" and severity == "benign":
                 severity = "high"
             
             specs.append((idx, category, scenario, severity))
             idx += 1
     
-    # Shuffle for variety during generation
     random.Random(config.RNG_SEED).shuffle(specs)
-    
     return specs
 
 
