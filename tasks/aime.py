@@ -65,8 +65,11 @@ class AIME(Task):
         Get a single AIME problem with prompt engineering (Zero-shot or Few-shot).
         """
         row = self.ds[index]
-        # Handle different column naming conventions (Problem/Answer vs problem/answer)
-        problem = row.get('problem') or row.get('Problem')
+        # Handle different column naming conventions:
+        # - problem/answer (Standard)
+        # - Problem/Answer (AIME 2024)
+        # - question/answer (AIME 2025)
+        problem = row.get('problem') or row.get('Problem') or row.get('question')
         answer = str(row.get('answer') or row.get('Answer'))
         
         # Prepare the prompt content
@@ -288,3 +291,35 @@ if __name__ == "__main__":
              
     except Exception as e:
         print(f"SKIP | Data loading test failed (Network/Dataset issue): {e}")
+
+    # 3. Test AIME 2025 Data Loading (Integration Test)
+    print("\n[Test 3] AIME 2025 Data Loading")
+    try:
+        # Note: AIME 2025 parts are usually in 'test' split on HF
+        task_25 = AIME(subset="aime25", split="test", num_fewshot=0)
+        print(f"Successfully loaded AIME2025 (Part I + II). Size: {len(task_25.ds)}")
+        
+        # DEBUG: Print column names
+        print(f"DEBUG: Dataset features/columns: {task_25.ds.features.keys() if hasattr(task_25.ds, 'features') else 'Unknown'}")
+        
+        # AIME 2025 should have 30 problems (15 from I + 15 from II)
+        if len(task_25.ds) == 30:
+             print("PASS | Size check (30 problems)")
+        else:
+             print(f"WARN | Size check (Expected 30, got {len(task_25.ds)})")
+             
+        ex_25 = task_25.get_example(0)
+        prompt_25 = ex_25['messages'][0]['content']
+        ref_25 = ex_25['reference_answer']
+        
+        print(f"\nExample 0 Reference Answer: {ref_25}")
+        print(f"Prompt 0 Preview:\n{prompt_25}")
+        
+        # Verify content extraction worked (not None)
+        if prompt_25 and "Problem:" in prompt_25:
+            print("PASS | AIME 2025 Content Extraction")
+        else:
+            print(f"FAIL | AIME 2025 Content Extraction (Prompt is empty or malformed)")
+            
+    except Exception as e:
+        print(f"SKIP | AIME 2025 loading failed: {e}")
