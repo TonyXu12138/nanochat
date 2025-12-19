@@ -165,4 +165,14 @@ NanoGPT原生支持pass@k evaluation, 对于AIME, Pass@K也是相对主流的eva
 
 
 
+## Other Implementation on training efficiency
 
+### torch.compile for sft stage.
+
+max_seq_len setup with truncation to avoid extreme long input is implemented.
+
+| Max_len \ Time | Avg Time for 50 steps |
+| :--- | :--- |
+| Dynamic | 198.92s |
+| 1024 | 164.78s |
+| 512(severe truncation) | 129.20s |
