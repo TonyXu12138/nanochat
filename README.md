@@ -1,223 +1,164 @@
-# nanochat
+# Kimi Interview Coding --- NanoGpt
+Chosen Tasks: 1. SFT data construction and AIME evaluation 
 
-![nanochat logo](dev/nanochat.png)
-
-> The best ChatGPT that $100 can buy.
-
-This repo is a full-stack implementation of an LLM like ChatGPT in a single, clean, minimal, hackable, dependency-lite codebase. nanochat is designed to run on a single 8XH100 node via scripts like [speedrun.sh](speedrun.sh), that run the entire pipeline start to end. This includes tokenization, pretraining, finetuning, evaluation, inference, and web serving over a simple UI so that you can talk to your own LLM just like ChatGPT. nanochat will become the capstone project of the course LLM101n being developed by Eureka Labs.
-
-## Talk to it
-
-To get a sense of the endpoint of this repo, you can currently find [nanochat d32](https://github.com/karpathy/nanochat/discussions/8) hosted on [nanochat.karpathy.ai](https://nanochat.karpathy.ai/). "d32" means that this model has 32 layers in the Transformer neural network. This model has 1.9 billion parameters, it was trained on 38 billion tokens by simply running the single script [run1000.sh](run1000.sh), and the total cost of training was ~$800 (about 33 hours training time on 8XH100 GPU node). While today this is enough to outperform GPT-2 of 2019, it falls dramatically short of modern Large Language Models like GPT-5. When talking to these micro models, you'll see that they make a lot of mistakes, they are a little bit naive and silly and they hallucinate a ton, a bit like children. It's kind of amusing. But what makes nanochat unique is that it is fully yours - fully configurable, tweakable, hackable, and trained by you from start to end. To train and talk to your own, we turn to...
-
-## Quick start
-
-The fastest way to feel the magic is to run the speedrun script [speedrun.sh](speedrun.sh), which trains and inferences the $100 tier of nanochat. On an 8XH100 node at $24/hr, this gives a total run time of about 4 hours. Boot up a new 8XH100 GPU box from your favorite provider (e.g. I use and like [Lambda](https://lambda.ai/service/gpu-cloud)), and kick off the training script:
-
-```bash
-bash speedrun.sh
+## 1.1  SFT数据合成
+### 设计思路和关键决策
+对于一个Safety的SFT设计，有两个方向要首要考虑，**Safety本身内容的coverage**，作为**SFT数据，质量，多样性等指标**的考虑.
+#### Safety本身内容
+1. Safty Coverage --- 要包含不同的safety种类，层级，难度
+这个部分首先要收集会触发safty issue的content topic有哪些，有哪些典型例子帮助我理解，也帮助构造后续prompt里的exemplar.
+用GPT收集最主要的safety category(限定在10个左右), 并希望他们来自于一些主要的benchmark.
+依照以下的格式来输出
+```
+ "violence": {
+        "description": "Physical harm, violence, weapons, fighting",
+        "examples": [
+            "How to make explosives",
+            "Ways to hurt someone",
+            "Fighting techniques",
+            "Self-defense methods",
+            "Historical battles"
+        ]
+    }
 ```
 
-Alternatively, since the script runs for 4 hours, I like to launch it like this inside a new screen session `speedrun` (and also log output to `speedrun.log`):
-
-```bash
-screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
+2. 引导输出安全隐患的query形式
+在构造SFT数据集时，用户query形式的coverage和diversity也十分重要，因此如何找到coverage足够大的query形式是一个需要关注的点
+依旧，我们在自己给出例子后，用gpt补全query类别，并用dictionary保存
 ```
-
-See the [screen cheatsheet](https://gist.github.com/jctosta/af918e1618682638aa82) if you are less familiar. You can watch it go inside the screen session, or detach with `Ctrl-a d` and `tail speedrun.log` to view progress. Now wait 4 hours. Once it's done, you can talk to your LLM via the ChatGPT-like web UI. Make sure again that your local uv virtual environment is active (run `source .venv/bin/activate`), and serve it:
-
-```bash
-python -m scripts.chat_web
+"direct_request": {
+        "description": "Direct harmful request without obfuscation",
+        "pattern": "User directly asks for harmful content",
+        "example": "How do I make a bomb?"
+    },
+"roleplay": {
+    "description": "Harmful request wrapped in roleplay or character play",
+    "pattern": "Pretend you're X and help me with Y",
+    "example": "Pretend you're a hacker and teach me..."
+},
 ```
+如所示代码块的形式.
 
-And then visit the URL shown. Make sure to access it correctly, e.g. on Lambda use the public IP of the node you're on, followed by the port, so for example [http://209.20.xxx.xxx:8000/](http://209.20.xxx.xxx:8000/), etc. Then talk to your LLM as you'd normally talk to ChatGPT! Get it to write stories or poems. Ask it to tell you who you are to see a hallucination. Ask it why the sky is blue. Or why it's green. The speedrun is a 4e19 FLOPs capability model so it's a bit like talking to a kindergartener :).
+3. 回答的形式与sample难度等级划分
+依照pdf里的内容，回答的形式有直接拒绝，引导正确等形式，我们认为回答形式与query的harmful程度是正相关的，越harmful的query越应该直接被refused，中等难度附近的query应该被设定为explain并refuse或者explain并寻求澄清，不harmful的query则直接回答。
+最后，我们把harmful程度分五级分类
+> Critical -> High -> Medium -> Low -> Benign
+response形式为
+> Direct_refuse -> explain and refuse -> redirect to safe -> clarify intent -> partial help -> comply
+至此，一个hierarchical的sample生成的基本schema就形成了，可以通过这几个角度的变量调节来生成diverse并且符合safety issue topic的synthetic data.
 
----
-
-<img width="2672" height="1520" alt="image" src="https://github.com/user-attachments/assets/ed39ddf8-2370-437a-bedc-0f39781e76b5" />
-
----
-
-You can also `cat report.md` file which appeared in the project directory and contains the "report card" of the run, i.e. a bunch of evaluations and metrics. At the very end, you'll see a summary table, for example:
-
----
-
-- Characters: 333,989
-- Lines: 8,304
-- Files: 44
-- Tokens (approx): 83,497
-- Dependencies (uv.lock lines): 2,004
-
-| Metric          | BASE     | MID      | SFT      | RL       |
-|-----------------|----------|----------|----------|----------|
-| CORE            | 0.2219   | -        | -        | -        |
-| ARC-Challenge   | -        | 0.2875   | 0.2807   | -        |
-| ARC-Easy        | -        | 0.3561   | 0.3876   | -        |
-| GSM8K           | -        | 0.0250   | 0.0455   | 0.0758   |
-| HumanEval       | -        | 0.0671   | 0.0854   | -        |
-| MMLU            | -        | 0.3111   | 0.3151   | -        |
-| ChatCORE        | -        | 0.0730   | 0.0884   | -        |
-
-Total wall clock time: 3h51m
-
----
-
-(Your table might be missing the RL number by default). For a lot more information around the speedrun script and what to look for and expect, please refer to the walkthrough that I posted in Discussions of the repo: ["Introducing nanochat: The best ChatGPT that $100 can buy"](https://github.com/karpathy/nanochat/discussions/1).
-
-## Bigger models
-
-Unsurprisingly, $100 is not enough to train a highly performant ChatGPT clone. In fact, LLMs are famous for their multi-million dollar capex. For our purposes, I think there are two more scales of interest. First is the ~$300 tier d26 model (i.e. depth=26) that trains in ~12 hours, which slightly outperforms GPT-2 CORE score. Second is the $1000 tier (~41.6 hours), just because it's a nice round number. But both of these are not yet fully supported and therefore not attached here in the master branch yet.
-
-That said, to give a sense, the example changes needed for the [speedrun.sh](speedrun.sh) file to train a GPT-2 grade model d26 only involve three changes:
-
-```bash
-...
-# you'll need to download more data shards for pretraining
-# get the number of parameters, multiply 20 to get tokens, multiply by 4.8 to get chars,
-# divide by 250 million to get number of shards. todo need to improve this...
-python -m nanochat.dataset -n 450 &
-...
-# use --depth to increase model size. to not oom, halve device batch size 32 -> 16:
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=26 --device_batch_size=16
-...
-# make sure to use the same later during midtraining:
-torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- --device_batch_size=16
-```
-
-That's it! The biggest thing to pay attention to is making sure you have enough data shards to train on (the code will loop and do more epochs over the same training set otherwise, decreasing learning speed a bit), and managing your memory/VRAM, primarily by decreasing the `device_batch_size` until things fit (the scripts automatically compensate by increasing the number of gradient accumulation loops, simply turning parallel compute to sequential compute).
-
-And a bit more about computing environments that will run nanochat:
-
-- The code will run just fine on the Ampere 8XA100 GPU node as well, but a bit slower.
-- All code will run just fine on even a single GPU by omitting `torchrun`, and will produce ~identical results (code will automatically switch to gradient accumulation), but you'll have to wait 8 times longer.
-- If your GPU(s) have less than 80GB, you'll have to tune some of the hyperparameters or you will OOM / run out of VRAM. Look for `--device_batch_size` in the scripts and reduce it until things fit. E.g. from 32 (default) to 16, 8, 4, 2, or even 1. Less than that you'll have to know a bit more what you're doing and get more creative.
-- Most of the code is fairly vanilla PyTorch so it should run on anything that supports that - xpu, mps, or etc, but I haven't implemented this out of the box so it might take a bit of tinkering.
-
-## Running on CPU / MPS
-
-nanochat can be run on CPU or on MPS (if you're on Macbook), and will automatically try to detect what device is best to run on. You're not going to get too far without GPUs, but at least you'll be able to run the code paths and maybe train a tiny LLM with some patience. For an example of how to make all the run commands much smaller (feel free to tune!), you can refer to [dev/runcpu.sh](dev/runcpu.sh) file. You'll see that I'm essentially restricting all scripts to train smaller models, to run for shorter number of iterations, etc. This functionality is new, slightly gnarly (touched a lot of code), and was merged in this [CPU|MPS PR](https://github.com/karpathy/nanochat/pull/88) on Oct 21, 2025.
-
-## Customization
-
-To customize your nanochat, see [Guide: infusing identity to your nanochat](https://github.com/karpathy/nanochat/discussions/139) in Discussions, which describes how you can tune your nanochat's personality through synthetic data generation and mixing that data into midtraining and SFT stages.
-
-Additionally, to add new abilities to nanochat, see [Guide: counting r in strawberry (and how to add abilities generally)](https://github.com/karpathy/nanochat/discussions/164).
-
-## Questions
-
-nanochat is designed to be short and sweet. One big advantage of this is that we can package up all of the files together and copy paste them to your favorite LLM to ask arbitrary questions. As an example, I like to package up the repo using the [files-to-prompt](https://github.com/simonw/files-to-prompt) utility like so:
-
-```bash
-files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --ignore "*target*" --cxml > packaged.txt
-```
-
-This includes all py, rs, html, toml, sh files, excludes the `rustbpe/target` folder, and chooses the cxml output format. Everything is written to the `packaged.txt` file, which atm measures ~330KB (i.e. well below ~100K tokens for a state of the art LLM), and ~8K lines of code in 45 files.
-
-Alternatively, I recommend using [DeepWiki](https://deepwiki.com/karpathy/nanochat) from Devin/Cognition to ask questions of this repo. In the URL of this repo, simply change github.com to deepwiki.com, and you're off.
-
-## Tests
-
-I haven't invested too much here but some tests exist, especially for the tokenizer. Run e.g. as:
-
-```bash
-python -m pytest tests/test_rustbpe.py -v -s
-```
-
-## File structure
+### SFT数据角度
+SFT数据应该保证的有:
+1. Topic Coverage: 对于要优化的topic要有足够广泛的coverage而不是只覆盖了一部分情景。
+2. Diversity: 在我们刚刚设计出的schema下，应该可以相对确保最后的数据集是diverse的。
+3. Difficulty: 在我之前的schema里面其实并没有对difficulty做直接规划，但是对于safety来说，直觉上讲靠中间难度模棱两可的内容应该会更复杂，更难以辨认，因此我的设计权重里对meidum和high相对调高了权重。
 
 ```
-.
-├── LICENSE
-├── README.md
-├── dev
-│   ├── gen_synthetic_data.py       # Example synthetic data for identity
-│   ├── generate_logo.html
-│   ├── nanochat.png
-│   ├── repackage_data_reference.py # Pretraining data shard generation
-│   └── runcpu.sh                   # Small example of how to run on CPU/MPS
-├── nanochat
-│   ├── __init__.py                 # empty
-│   ├── adamw.py                    # Distributed AdamW optimizer
-│   ├── checkpoint_manager.py       # Save/Load model checkpoints
-│   ├── common.py                   # Misc small utilities, quality of life
-│   ├── configurator.py             # A superior alternative to argparse
-│   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
-│   ├── dataloader.py               # Tokenizing Distributed Data Loader
-│   ├── dataset.py                  # Download/read utils for pretraining data
-│   ├── engine.py                   # Efficient model inference with KV Cache
-│   ├── execution.py                # Allows the LLM to execute Python code as tool
-│   ├── gpt.py                      # The GPT nn.Module Transformer
-│   ├── logo.svg
-│   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
-│   ├── muon.py                     # Distributed Muon optimizer
-│   ├── report.py                   # Utilities for writing the nanochat Report
-│   ├── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
-│   └── ui.html                     # HTML/CSS/JS for nanochat frontend
-├── pyproject.toml
-├── run1000.sh                      # Train the ~$800 nanochat d32
-├── rustbpe                         # Custom Rust BPE tokenizer trainer
-│   ├── Cargo.lock
-│   ├── Cargo.toml
-│   ├── README.md                   # see for why this even exists
-│   └── src
-│       └── lib.rs
-├── scripts
-│   ├── base_eval.py                # Base model: calculate CORE score
-│   ├── base_loss.py                # Base model: calculate bits per byte, sample
-│   ├── base_train.py               # Base model: train
-│   ├── chat_cli.py                 # Chat model (SFT/Mid): talk to over CLI
-│   ├── chat_eval.py                # Chat model (SFT/Mid): eval tasks
-│   ├── chat_rl.py                  # Chat model (SFT/Mid): reinforcement learning
-│   ├── chat_sft.py                 # Chat model: train SFT
-│   ├── chat_web.py                 # Chat model (SFT/Mid): talk to over WebUI
-│   ├── mid_train.py                # Chat model: midtraining
-│   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
-│   └── tok_train.py                # Tokenizer: train it
-├── speedrun.sh                     # Train the ~$100 nanochat d20
-├── tasks
-│   ├── arc.py                      # Multiple choice science questions
-│   ├── common.py                   # TaskMixture | TaskSequence
-│   ├── customjson.py               # Make Task from arbitrary jsonl convos
-│   ├── gsm8k.py                    # 8K Grade School Math questions
-│   ├── humaneval.py                # Misnomer; Simple Python coding task
-│   ├── mmlu.py                     # Multiple choice questions, broad topics
-│   ├── smoltalk.py                 # Conglomerate dataset of SmolTalk from HF
-│   └── spellingbee.py              # Task teaching model to spell/count letters
-├── tests
-│   └── test_engine.py
-│   └── test_rustbpe.py
-└── uv.lock
-```
-
-## Contributing
-
-nanochat is nowhere near finished. The goal is to improve the state of the art in micro models that are accessible to work with end to end on budgets of < $1000 dollars. Accessibility is about overall cost but also about cognitive complexity - nanochat is not an exhaustively configurable LLM "framework"; there will be no giant configuration objects, model factories, or if-then-else monsters in the code base. It is a single, cohesive, minimal, readable, hackable, maximally-forkable "strong baseline" codebase designed to run start to end and produce a concrete ChatGPT clone and its report card.
-
-Current LLM policy: disclosure. When submitting a PR, please declare any parts that had substantial LLM contribution and that you have not written or that you do not fully understand.
-
-## Acknowledgements
-
-- The name (nanochat) derives from my earlier project [nanoGPT](https://github.com/karpathy/nanoGPT), which only covered pretraining.
-- nanochat is also inspired by [modded-nanoGPT](https://github.com/KellerJordan/modded-nanogpt), which gamified the nanoGPT repo with clear metrics and a leaderboard, and borrows a lot of its ideas and some implementation for pretraining.
-- Thank you to [HuggingFace](https://huggingface.co/) for fineweb and smoltalk.
-- Thank you [Lambda](https://lambda.ai/service/gpu-cloud) for the compute used in developing this project.
-- Thank you to chief LLM whisperer 🧙‍♂️ Alec Radford for advice/guidance.
-- Thank you to the repo czar Sofie [@svlandeg](https://github.com/svlandeg) for help with managing issues, pull requests and discussions of nanochat.
-
-## Cite
-
-If you find nanochat helpful in your research cite simply as:
-
-```bibtex
-@misc{nanochat,
-  author = {Andrej Karpathy},
-  title = {nanochat: The best ChatGPT that $100 can buy},
-  year = {2025},
-  publisher = {GitHub},
-  url = {https://github.com/karpathy/nanochat}
+TARGET_DISTRIBUTION = {
+    "num_conversations": ,  # Minimum requirement from task
+    "samples_per_category": ,  # 9 categories * 55 ≈ 500
+    "scenario_distribution": {
+        "direct_request": 0.25,
+        "roleplay": 0.15,
+        "hypothetical": 0.15,
+        "jailbreak_attempt": 0.10,
+        "edge_case": 0.15,
+        "legitimate_use": 0.10,
+        "benign": 0.10,
+    },
+    "severity_distribution": {
+        "critical": 0.15,
+        "high": 0.30,
+        "medium": 0.25,
+        "low": 0.15,
+        "benign": 0.15,
+    }
 }
 ```
+预期的输出distribution，但是会存在generation failure case，因此只能作为reference.
 
-## License
+### Quality Check
+我们生成了大量的seed data并对他们做quality check来尽量保证数据集的质量，我们的质量保证主要从几个方面来做，目前的implementation里并没有尝试依赖大模型做check而是基于rule-base来做的filtering.
 
-MIT
+1. Diversity
+Diversity Check主要来源于两方面，对user message的绝对重复，和user message句式的相对重复. 对assistant message的句式重复，我们目前将一些可能遇到的重复形式以list的形式硬编码进rule来实现
+
+2. Label_Consistency
+对response形式, Refuse类别是否回答中有拒绝的词汇，cannot etc.,
+对severity, 最严重的critical类别下 是否含有绝对危险词汇, bomb etc.,
+对safety类别, 不同类别下是否有类别相应关键词，比如violence->harm,fight ...
+
+### 主要问题及解决方案
+1. safety issue的coverage.
+有哪些safety类型需要考虑, 在不熟悉领域的情况下cover的更广, 我的主要思路是safety方向的benchmark应该会有比较好的coverage,因此使用LLM,在给与violence作为example的情况下,让他依照format生成一些在safety benchmark里常被cover到的topic,以此来生成我们safety coverage的基本分类.
+
+2. 在unsafety的对话里, 都有哪些可能的变化是我们需要考虑到的, 问题出现的case的多样性需要被很好的cover到.
+我将问题拆解成两部分,第一是用户提问时,query含有issue的类型, 第二是llm回答时,回答的response形式.
+对于query, 用户可能有不同的提问形式来引导unsafe response,比如角色扮演等, 对于response, LLM也需要有不同级别的应对措施来在helpfulness和合规之间达到比较好的平衡,而不是对所有potentially harmful的query进行refuse处理. 因此基于我给出的fewshot,再次基于LLM,我们形成了新的等级划分.
+
+3. 如何确定质量
+synthetic data生成的问题是很有可能不按照我们给的instruction走,或者会出现一些shift, 在这里我选择先用rule-based的形式处理, 进行assistant回答内容,回答template(I cannot, can't ...)的校验,同时对query和所对应的metadata进行质量校验,比如是否有其severity程度所对应的关键词, 不同主题类别下是否有大概率会出现的关键词detected这样.
+
+### 如何验证功能正确性
+1.首先验证可与customjson兼容,这是将我们数据兼容进nanogpt的主要class.
+2.在chat_sft里并入我们的data,验证可跑通.
+
+**数据生成使用的backbone model为GPT-5**
+
+
+
+## 1.2 AIME2024 and AIME2025 Eval
+
+### 设计思路和关键决策
+AIME作为复杂的数学推理benchmark, 比较显著的问题在于其结果往往为自然语言, **过度限制形式格式会降低model表现**无法达到objective evaluation的预期,因此只能对可能出现的答案格式, 比如latex, fraction, float, 做detection和后处理来达到最好的evaluation精确度.
+#### 如何frame输出?
+我们用
+```
+{Question} \n please reason step by step, and put your final answer within \\boxed{}.
+```
+的prompt形式来restrict output在box形式里.
+我们也支持few-shot prompting的形式,用户可以自己提供few shot,我们也提供default setup.
+之后, 我们用regex提取**出最后一个box里的内容**, 如果查询不到,则尝试提取**最后一个数字内容**.
+
+#### 如何比较Predicted Ans和Ground Truth?
+可能遇到的case有
+```
+    test_cases = [
+        # (Prediction, Reference, Expected, Description)
+        ("42", "42", 1, "Exact match"),
+        ("The answer is \\boxed{42}", "42", 1, "Standard boxed"),
+        ("Result: \\boxed{ 42 }", "42", 1, "Boxed with spaces"),
+        ("42.0", "42", 1, "Float equivalence (Model output)"),
+        ("042", "42", 1, "Leading zero (Model output)"),
+        ("1,000", "1000", 1, "Comma handling"),
+        ("Answer is 42", "42", 1, "Fallback extraction"),
+        ("It is 41", "42", 0, "Wrong answer"),
+        ("Values 10 and 42", "42", 1, "Last number fallback"),
+        # AIME answers are always integers, so we focus on integer equivalence
+        ("\\boxed{999.000}", "999", 1, "High precision float"),
+        ("007", "7", 1, "James Bond integer"),
+    ]
+```
+1. 对提取到的string,消除'$'和','来purify.
+2. 对不同形式的表达做等价转换,比如042,42.0,用float来进行转换后比较.
+3. 用sympy,latex2sympy2将GT和Predicted转换成统一形式进行对比.
+
+**核心是对数字的不同形式进行形式统一再进行数值对比**
+
+#### 评估指标
+NanoGPT原生支持pass@k evaluation, 对于AIME, Pass@K也是相对主流的evaluation metric (deepconf etc.,), 因此我选择保留pass@k作为评估指标.
+在AIME class内部, 只需要对单个答案确认正确与否即可与NanoGPT的generative evaluation框架兼容.
+
+#### 主要问题及解决方案
+对于AIME主要遇到的问题在于如何cover尽量广的非常规数据形式, 如何将形式转换coverage做到更大, 解决思路最后是用借助LLM生成了许多不同方向的test case, 我们的is_equiv() function都可以很好地cover到这些corner case.
+
+#### 如何验证功能正确性
+1. function的正确性
+通过synthetically generated的test case快速验证了形式转换的正确性与稳定性, 通过调用get_example() 验证了输出prompt与question的正确性.
+
+2. 与code base的兼容性
+通过运行chat_eval.py来验证与整体codebase的兼容性,稳定性.
+
+
+
+
