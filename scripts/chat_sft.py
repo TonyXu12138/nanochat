@@ -10,6 +10,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft
 """
 
 import os
+import time
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import wandb
@@ -33,6 +34,7 @@ from tasks.spellingbee import SimpleSpelling, SpellingBee
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
+max_seq_len = 512 # max sequence length to truncate the data to. non-zero value indicates torch.compile is activated.
 # input model options
 source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
 model_tag = None # model tag to load the model from (base model or midtrained model)
@@ -77,7 +79,8 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sf
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
 orig_model = model # original, uncompiled model
-# model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
+if max_seq_len > 0:
+    model = torch.compile(model, dynamic=False)
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
 
 # -----------------------------------------------------------------------------
@@ -99,15 +102,20 @@ val_ds = SmolTalk(split="test") # general conversations, 24K rows (though we don
 # -----------------------------------------------------------------------------
 # DataLoader
 
-def sft_data_generator(dataset, batch_size):
+def sft_data_generator(dataset, batch_size, max_seq_len = 0):
     pad_token_id = tokenizer.encode_special("<|assistant_end|>") # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
     # prepares a list of tokenized conversations into a batch and yields
     def collate_and_yield(batch):
         nrows = len(batch)
-        ncols = max(len(ids) for ids, mask in batch) - 1 # seq of n creates inputs/targets of n-1
+        ncols = max(len(ids) for ids, mask in batch) - 1  if max_seq_len == 0 else max_seq_len  # seq of n creates inputs/targets of n-1
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
         targets = torch.full((nrows, ncols), -1, dtype=torch.long) # -1 is ignore index
         for i, (ids, mask) in enumerate(batch):
+            #truncate
+            if max_seq_len > 0 and len(ids) > ncols +1:
+                ids = ids[:ncols + 1]
+                mask = mask[:ncols + 1]
+
             n = len(ids)
             ids_tensor = torch.tensor(ids, dtype=torch.long)
             inputs[i, :n-1] = ids_tensor[:-1]
@@ -143,8 +151,8 @@ if num_iterations == -1:
     # derive num_iterations from num_epochs and the size of the dataset
     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
-train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
+train_loader = sft_data_generator(train_ds, batch_size=device_batch_size) if max_seq_len == 0 else sft_data_generator(train_ds, batch_size=device_batch_size, max_seq_len=max_seq_len)
+build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size) if max_seq_len == 0 else sft_data_generator(val_ds, batch_size=device_batch_size, max_seq_len=max_seq_len)
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -171,18 +179,20 @@ def get_lr_multiplier(it):
 
 # Go!
 step = 0
+last_report_time = time.time()
 for step in range(num_iterations):
     last_step = step == num_iterations - 1
 
     # evaluate the validation loss
     if last_step or step % eval_every == 0:
-        model.eval()
+        # use orig_model (uncompiled) for validation to avoid recompilation overhead
+        orig_model.eval()
         val_loader = build_val_loader()
         losses = []
         for _ in range(eval_steps):
             val_inputs, val_targets = next(val_loader)
             with torch.no_grad(), autocast_ctx:
-                loss = model(val_inputs, val_targets)
+                loss = orig_model(val_inputs, val_targets)
             losses.append(loss)
         val_loss = torch.stack(losses).mean() # average over eval_steps
         if ddp:
@@ -193,22 +203,25 @@ for step in range(num_iterations):
             "step": step,
             "val_loss": val_loss,
         })
+        # model (compiled or not) is what we train
         model.train()
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
     if last_step or (step > 0 and step % eval_metrics_every == 0):
-        model.eval()
+        # use orig_model (uncompiled) for evaluation to avoid recompilation overhead with variable seq lengths
+        orig_model.eval()
         metrics = {}
         with torch.no_grad(), autocast_ctx:
             # note that because these are inside no_grad, we can usually afford to at least ~2X the batch size
-            metrics["mmlu_acc"] = run_chat_eval("MMLU", model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
-            metrics["arc_easy_acc"] = run_chat_eval("ARC-Easy", model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
+            metrics["mmlu_acc"] = run_chat_eval("MMLU", orig_model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
+            metrics["arc_easy_acc"] = run_chat_eval("ARC-Easy", orig_model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
         metrics_str = ', '.join(f'{k}: {v:.6f}' for k, v in metrics.items())
         print0(f"Step {step:05d} | {metrics_str}")
         wandb_run.log({
             "step": step,
             **metrics,
         })
+        # model (compiled or not) is what we train
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps (only on master process)
@@ -226,7 +239,7 @@ for step in range(num_iterations):
             {
                 "step": step,
                 "val_loss": val_loss,
-                **metrics,
+                # **metrics,
                 "model_config": model_config_kwargs,
                 "user_config": user_config, # inputs to the training script
             }
@@ -270,6 +283,12 @@ for step in range(num_iterations):
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
     })
+
+    if step > 0 and step % 50 == 0:
+        current_time = time.time()
+        elapsed_time = current_time - last_report_time
+        print0(f"Step {step:05d} | Time for last 50 steps: {elapsed_time:.2f}s")
+        last_report_time = current_time
     
     # cleanup to prevent OOM
     del loss
