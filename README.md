@@ -43,8 +43,10 @@ Chosen Tasks: 1. SFT data construction and AIME evaluation
 依照pdf里的内容，回答的形式有直接拒绝，引导正确等形式，我们认为回答形式与query的harmful程度是正相关的，越harmful的query越应该直接被refused，中等难度附近的query应该被设定为explain并refuse或者explain并寻求澄清，不harmful的query则直接回答。
 最后，我们把harmful程度分五级分类
 > Critical -> High -> Medium -> Low -> Benign
+
 response形式为
 > Direct_refuse -> explain and refuse -> redirect to safe -> clarify intent -> partial help -> comply
+
 至此，一个hierarchical的sample生成的基本schema就形成了，可以通过这几个角度的变量调节来生成diverse并且符合safety issue topic的synthetic data.
 
 ### SFT数据角度
@@ -98,9 +100,11 @@ Diversity Check主要来源于两方面，对user message的绝对重复，和us
 
 3. 如何确定质量
 synthetic data生成的问题是很有可能不按照我们给的instruction走,或者会出现一些shift, 在这里我选择先用rule-based的形式处理, 进行assistant回答内容,回答template(I cannot, can't ...)的校验,同时对query和所对应的metadata进行质量校验,比如是否有其severity程度所对应的关键词, 不同主题类别下是否有大概率会出现的关键词detected这样.
+**个人认为这在目前是相对naive的实现**, rule-based实现方式可能会反过来harm diversity, LLM as judge会是上限更高的选择.
 
 ### 如何验证功能正确性
 1.首先验证可与customjson兼容,这是将我们数据兼容进nanogpt的主要class.
+
 2.在chat_sft里并入我们的data,验证可跑通.
 
 **数据生成使用的backbone model为GPT-5**
