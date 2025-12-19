@@ -47,6 +47,7 @@ weight_decay = 0.0
 eval_every = 150 # -1 = disable
 eval_tokens = 20*524288
 total_batch_size = 524288
+save_every = 100 # save checkpoint every N steps (-1 = disable, only save at the end)
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -205,8 +206,8 @@ while True:
         })
         model.train()
 
-    # save checkpoint at the end of the run (only on master process)
-    if master_process and last_step and not dry_run:
+    # save checkpoint: at the end of the run, or every save_every steps (only on master process)
+    if master_process and not dry_run and (last_step or (step > 0 and save_every > 0 and step % save_every == 0)):
         output_dirname = f"d{depth}" # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "mid_checkpoints", output_dirname)
         save_checkpoint(
@@ -228,6 +229,7 @@ while True:
                 "user_config": user_config, # inputs to the training script
             }
         )
+        print0(f"Checkpoint saved at step {step}")
 
     if last_step:
         break

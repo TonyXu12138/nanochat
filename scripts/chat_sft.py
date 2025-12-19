@@ -55,6 +55,8 @@ eval_every = 100
 eval_steps = 100
 eval_metrics_every = 200
 eval_metrics_max_problems = 1024
+save_every = 100 # save checkpoint every N steps (-1 = disable, only save at the end)
+dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -81,7 +83,9 @@ engine = Engine(model, tokenizer) # will be used for inline model evaluation onl
 # -----------------------------------------------------------------------------
 # Task data mixture we'll train on
 identity_conversations_filepath = os.path.join(get_base_dir(), "identity_conversations.jsonl")
+safety_conversations_filepath = os.path.join(get_base_dir(), "safety_conversations.jsonl")
 train_ds = TaskMixture([
+    CustomJSON(filepath=safety_conversations_filepath), # 1K rows of synthetic identity conversations
     ARC(subset="ARC-Easy", split="train"), # 2.3K rows
     ARC(subset="ARC-Challenge", split="train"), # 1.1K rows
     GSM8K(subset="main", split="train"), # 8K rows
@@ -207,6 +211,28 @@ for step in range(num_iterations):
         })
         model.train()
 
+    # save checkpoint: at the end of the run, or every save_every steps (only on master process)
+    if master_process and not dry_run and (last_step or (step > 0 and save_every > 0 and step % save_every == 0)):
+        base_dir = get_base_dir()
+        depth = model.config.n_layer
+        model_tag = f"d{depth}" # base the model tag on the depth of the base model
+        checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", model_tag)
+        model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
+        save_checkpoint(
+            checkpoint_dir,
+            step,
+            model.state_dict(),
+            None, # note: we don't bother to save the optimizer state
+            {
+                "step": step,
+                "val_loss": val_loss,
+                **metrics,
+                "model_config": model_config_kwargs,
+                "user_config": user_config, # inputs to the training script
+            }
+        )
+        print0(f"Checkpoint saved at step {step}")
+
     if last_step:
         break
 
@@ -244,6 +270,12 @@ for step in range(num_iterations):
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
     })
+    
+    # cleanup to prevent OOM
+    del loss
+    if device_type == "cuda":
+        torch.cuda.empty_cache()
+    
     step += 1
 
 # Save the model at the end of the run
